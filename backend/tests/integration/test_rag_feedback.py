@@ -2,7 +2,7 @@ import pytest
 import types
 import sys
 from fastapi.testclient import TestClient
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -15,6 +15,7 @@ from app.models.user import User, SubscriptionTier
 class DummyDoc:
     def __init__(self, source):
         self.metadata = {"source": source}
+        self.page_content = "some content"
 
 
 def _get_test_db():
@@ -58,16 +59,12 @@ def test_query_feedback_and_low_quality_flow(client):
         ],
     }
 
-    mod = types.ModuleType("app.modules.rag.retrieval_chain")
+    fake_chain = MagicMock(return_value=fake_result)
 
-    def _fake_get_qa_chain():
-        return lambda payload: fake_result
-
-    mod.get_qa_chain = _fake_get_qa_chain
-
-    # Wrap the request inside patch.dict so the mock is active when the
-    # endpoint resolves its import — not just when the test function runs
-    with patch.dict(sys.modules, {"app.modules.rag.retrieval_chain": mod}):
+    # Patch get_qa_chain at the retrieval_chain module level AND
+    # patch compute_groundedness to avoid any vector store dependency
+    with patch("app.modules.rag.retrieval_chain.get_qa_chain", return_value=fake_chain), \
+         patch("app.modules.rag.groundedness.compute_groundedness", return_value=0.9):
         resp = client.post("/api/v1/rag/query", json={"question": "What is X?"})
 
     assert resp.status_code == 200
