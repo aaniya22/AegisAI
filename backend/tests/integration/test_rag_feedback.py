@@ -63,8 +63,8 @@ def test_query_feedback_and_low_quality_flow(client):
 
     # Patch at the point of use: the rag endpoint module imports these names
     # inside the function body, so we intercept them in app.api.v1.rag
-    with patch("app.api.v1.rag.get_qa_chain", return_value=fake_chain), \
-         patch("app.api.v1.rag.compute_groundedness", return_value=0.9):
+    with patch("app.modules.rag.retrieval_chain.get_qa_chain", return_value=fake_chain), \
+         patch("app.modules.rag.groundedness.compute_groundedness", return_value=0.9):
         resp = client.post("/api/v1/rag/query", json={"question": "What is X?"})
 
     assert resp.status_code == 200
