@@ -1,12 +1,22 @@
 """
-Webhooks API — configure outbound event delivery URLs.
+Webhooks API - configure outbound event delivery URLs.
+
+Changed: Resolved merge conflicts while preserving user-scoped webhook CRUD.
+Why: Webhooks must not be creatable or deletable on behalf of another user.
+Addresses: Cross-user webhook access and broken imports/docstrings after merge.
+
 Copyright (C) 2024 Sarthak Doshi (github.com/SdSarthak)
 SPDX-License-Identifier: AGPL-3.0-only
 """
 
-from typing import List
+import hashlib
+import hmac
+import json
+import logging
+from typing import Any, List
 
-from fastapi import APIRouter, Depends, HTTPException, status
+import httpx
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -16,6 +26,66 @@ from app.models.webhook import WebhookConfig
 from app.schemas.webhook import WebhookCreate, WebhookResponse
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+def _build_signature(secret: str, payload_body: bytes) -> str:
+    """Generate an HMAC-SHA256 signature for a webhook payload."""
+    return hmac.new(
+        secret.encode("utf-8"),
+        payload_body,
+        hashlib.sha256,
+    ).hexdigest()
+
+
+async def _post_webhook(
+    url: str,
+    event: str,
+    payload: dict[str, Any],
+    secret: str | None,
+) -> None:
+    """Post a webhook payload to a configured endpoint."""
+    try:
+        payload_body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        headers = {"X-AegisAI-Event": event}
+
+        if secret:
+            headers["X-AegisAI-Signature"] = _build_signature(secret, payload_body)
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(url, content=payload_body, headers=headers)
+    except Exception:
+        logger.exception("Webhook delivery failed for event=%s url=%s", event, url)
+
+
+def deliver_webhook(
+    db: Session,
+    user_id: int,
+    event: str,
+    payload: dict[str, Any],
+    background_tasks: BackgroundTasks,
+) -> None:
+    """Schedule delivery to active user webhooks subscribed to the event."""
+    webhooks = (
+        db.query(WebhookConfig)
+        .filter(
+            WebhookConfig.user_id == user_id,
+            WebhookConfig.is_active.is_(True),
+        )
+        .all()
+    )
+
+    for webhook in webhooks:
+        if event not in (webhook.events or []):
+            continue
+
+        background_tasks.add_task(
+            _post_webhook,
+            url=webhook.url,
+            event=event,
+            payload=payload,
+            secret=webhook.secret,
+        )
 
 
 @router.post("", response_model=WebhookResponse, status_code=status.HTTP_201_CREATED)
@@ -23,24 +93,10 @@ def create_webhook(
     body: WebhookCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-):
-    """Register a new webhook endpoint for the current user.
-
-    Args:
-        body: Payload containing the webhook URL and event configuration.
-        current_user: The authenticated user extracted from the JWT token.
-        db: Database session dependency.
-
-    Returns:
-        WebhookResponse: The newly created webhook configuration with HTTP 201.
-    """
+) -> WebhookConfig:
+    """Register a new webhook endpoint for the current user."""
     webhook_data = body.model_dump()
-    webhook_data["url"] = str(body.url)
-
-    db_webhook = WebhookConfig(
-        **webhook_data,
-        user_id=current_user.id,
-    )
+    db_webhook = WebhookConfig(**webhook_data, user_id=current_user.id)
 
     db.add(db_webhook)
     db.commit()
@@ -53,16 +109,8 @@ def create_webhook(
 def list_webhooks(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-):
-    """List all webhook configurations for the current user.
-
-    Args:
-        current_user: The authenticated user extracted from the JWT token.
-        db: Database session dependency.
-
-    Returns:
-        List[WebhookResponse]: All webhook configs belonging to the current user.
-    """
+) -> list[WebhookConfig]:
+    """List all webhook configurations for the current user."""
     return (
         db.query(WebhookConfig)
         .filter(WebhookConfig.user_id == current_user.id)
@@ -75,20 +123,8 @@ def delete_webhook(
     webhook_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-):
-    """Delete a webhook configuration belonging to the current user.
-
-    Args:
-        webhook_id: The unique identifier of the webhook to delete.
-        current_user: The authenticated user extracted from the JWT token.
-        db: Database session dependency.
-
-    Returns:
-        None: HTTP 204 No Content on success.
-
-    Raises:
-        HTTPException: 404 if webhook not found or not owned by user.
-    """
+) -> None:
+    """Delete a webhook configuration owned by the current user."""
     db_webhook = (
         db.query(WebhookConfig)
         .filter(
@@ -98,7 +134,7 @@ def delete_webhook(
         .first()
     )
 
-    if db_webhook is None:
+    if not db_webhook:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Webhook not found",
@@ -106,5 +142,4 @@ def delete_webhook(
 
     db.delete(db_webhook)
     db.commit()
-
     return None
