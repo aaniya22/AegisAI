@@ -12,7 +12,7 @@ TODO for contributors (help wanted):
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func
+
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -164,3 +164,4 @@ def get_audit_logs(
     logs = base_query.order_by(GuardScanLog.scanned_at.desc()).offset(skip).limit(limit).all()
 
     return PaginatedResponse(items=logs, total=total, skip=skip, limit=limit)
+
